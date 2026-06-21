@@ -218,8 +218,11 @@ class Settings:
                     thissystem[key] = tsystem[key]
         #############################################################
         thisdata = {"units": "metal", "dimension": 3, "boundary": "p p p",
-                    "Relaxed": True, "BoxRelax": False, "MoleDyn": False,
-                    "RinputOpt": False, "RinputMD": False, "RinputMD0": False}
+                    "Relaxed": True, "InitialRelaxActiveOnly": False, "BoxRelax": False, "MoleDyn": False,
+                    "RinputOpt": False, "RinputMD": False, "RinputMD0": False,
+                    "CropInputForActiveRelax": {"Enable": False, "OutputFile": "data.cropped.dat",
+                                                "Ranges": [[-80.0, 80.0], [-80.0, 80.0], [-80.0, 80.0]],
+                                                "SummaryFile": "scan_input_summary.json"}}
         data = parameters['data']
         if "FileName" not in data:
             raise ValueError("There must be a FileName for data!")
@@ -244,7 +247,7 @@ class Settings:
         thisdata["PBC"] = PBC
         #########################################################
         Relaxation = {"BoxRelax": False, "InitTemp4Opt": 0.0, "TargetTemp4NVT": 5.0, "NVTSteps4Opt": 10000}
-        TrialDisps2Basin = {"TrialDisps2Basin": False, "RinputTDB": None, "Ref_Length": None,
+        TrialDisps2Basin = {"TrialDisps2Basin": False, "Rinput4TDB": None, "Ref_Length": None,
                             "Target_StrainRate": None,
                             "Disps": [0.001, 0.002, 0.004, 0.008], "nDisps": 4,
                             "MinDisp": 0.0001, "MaxDisp": 0.01, "StrainRateType": 1,
@@ -725,7 +728,8 @@ class Settings:
         ################################################################################
         thisKMC = {"NSteps": 1, "Temp": 800.0, "Temp4Time": 800.0, "AccStyle": "NoAcc", "NMaxBasin": "NA",
                    "Tol4Disp": 0.1, "Tol4Barr": 0.03,
-                   "EnCut4Transient": 0.5, "Handle_no_Backward": "Out", "DispStyle": "FI", "Sorting": False}
+                   "EnCut4Transient": 0.5, "Handle_no_Backward": "Out", "DispStyle": "FI", "Sorting": False,
+                   "RelaxAfterKMC": True}
         if "kinetic_MC" in parameters:
             KMC = parameters['kinetic_MC']
             for key in KMC:
@@ -919,6 +923,22 @@ class Settings:
             if not self.dynamic_matrix["CalPrefactor"]:
                 errormsg = f"To output dynamic matrix, 'CalPrefactor' has to be True!"
                 error_exit(errormsg)
+
+        crop_enabled = False
+        crop_settings = self.data.get("CropInputForActiveRelax", {"Enable": False})
+        if isinstance(crop_settings, dict):
+            crop_enabled = crop_settings.get("Enable", False)
+        else:
+            crop_enabled = bool(crop_settings)
+        if crop_enabled and not self.data.get("InitialRelaxActiveOnly", False):
+            raise ValueError("data.CropInputForActiveRelax can only be enabled when data.InitialRelaxActiveOnly is true!")
+        if self.data.get("InitialRelaxActiveOnly", False):
+            if self.data.get("MoleDyn", False):
+                raise ValueError("data.InitialRelaxActiveOnly does not support data.MoleDyn!")
+            if self.saddle_point.get("CalBarrsInData", False):
+                raise ValueError("data.InitialRelaxActiveOnly does not support saddle_point.CalBarrsInData!")
+            if self.force_evaluator["TrialDisps2Basin"].get("TrialDisps2Basin", False):
+                raise ValueError("data.InitialRelaxActiveOnly does not support force_evaluator.TrialDisps2Basin!")
 
         if self.saddle_point["CalBarrsInData"] and self.saddle_point["CalEbiasInData"]:
             self.spsearch["LocalRelax"]["LocalRelax"] = True

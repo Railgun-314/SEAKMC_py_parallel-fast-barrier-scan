@@ -20,6 +20,123 @@ from seakmc_p.restart.Restart import RESTART
 from seakmc_p.spsearch.SaddlePoints import Data_SPs
 from seakmc_p.mpiconf.error_exit import error_exit
 from seakmc_p.process.TrialDisp2Basin import TrialDisps, TrialDisp2Basin
+from seakmc_p.general.Timing import timing_print
+
+
+def _reset_data_for_defect_rebuild(seakmcdata):
+    seakmcdata.to_atom_style()
+    seakmcdata.velocities = None
+    seakmcdata.defects = None
+    seakmcdata.def_atoms = []
+    seakmcdata.atoms_ghost = None
+    seakmcdata.natoms_ghost = 0
+    return seakmcdata
+
+
+def relax_initial_active_volumes(thissett, seakmcdata, force_evaluator, LogWriter,
+                                 last_de_center=None, nproc_task=1, GPU_args=None):
+    """Relax only active atoms of each initial active volume.
+
+    This is the MPI-safe counterpart of the fast-scan initial relaxation hook:
+    all ranks participate in each SPSRELAX call, while only rank 0 writes logs.
+    """
+    comm_world = MPI.COMM_WORLD
+    rank_world = comm_world.Get_rank()
+    if not thissett.data.get("InitialRelaxActiveOnly", False):
+        return seakmcdata, 0.0
+    if thissett.saddle_point.get("CalBarrsInData", False):
+        error_exit("data.InitialRelaxActiveOnly does not support saddle_point.CalBarrsInData.")
+    if thissett.force_evaluator["TrialDisps2Basin"].get("TrialDisps2Basin", False):
+        error_exit("data.InitialRelaxActiveOnly does not support force_evaluator.TrialDisps2Basin.")
+
+    if GPU_args is None:
+        GPU_args = {}
+    t_all = time.perf_counter()
+    ndefects_initial = seakmcdata.ndefects
+    if ndefects_initial < 1:
+        error_exit("InitialRelaxActiveOnly found no active volume to relax.")
+    if rank_world == 0:
+        LogWriter.write_data(
+            f"InitialRelaxActiveOnly: locally relaxing {ndefects_initial} active volumes before writing KMC_0_Data_AVs.dat."
+        )
+
+    local_energies = []
+    seen_itags = set()
+    for idav in range(ndefects_initial):
+        t_idav = time.perf_counter()
+        seakmcdata = _reset_data_for_defect_rebuild(seakmcdata)
+        seakmcdata.get_defects(LogWriter, last_de_center=last_de_center)
+        if seakmcdata.ndefects != ndefects_initial:
+            error_exit(
+                "InitialRelaxActiveOnly aborts because defect count changed during AV rebuild: "
+                f"initial={ndefects_initial}, current={seakmcdata.ndefects}."
+            )
+
+        thisAV = seakmcdata.get_active_volume(idav, Rebuild=True)
+        active_itags = thisAV.itags[0:thisAV.nactive].astype(int).copy()
+        overlap = sorted(set(active_itags.tolist()).intersection(seen_itags))
+        if overlap and rank_world == 0:
+            LogWriter.write_data(
+                f"InitialRelaxActiveOnly warning: AV {idav} overlaps previously relaxed AVs on "
+                f"{len(overlap)} active atoms; later AV coordinates overwrite earlier ones."
+            )
+        seen_itags.update(active_itags.tolist())
+
+        original_coords = thisAV.to_coords(Buffer=False, Fixed=False)
+        try:
+            force_evaluator.close()
+        except Exception:
+            pass
+        force_evaluator.init_binary(comm=comm_world,
+                                    Screen=thissett.force_evaluator['Screen'],
+                                    Log=thissett.force_evaluator['LogFile'],
+                                    **GPU_args)
+        [encalc, coords, isValid, errormsg] = force_evaluator.run_runner(
+            "SPSRELAX", thisAV, 0, nactive=thisAV.nactive, comm=comm_world)
+        force_evaluator.close()
+        comm_world.Barrier()
+
+        coords = np.asarray(coords, dtype=float)
+        if coords.size < 3 * thisAV.nactive:
+            error_exit(
+                f"InitialRelaxActiveOnly aborts because SPSRELAX returned only {coords.size} coordinate values "
+                f"for AV {idav}, but {3 * thisAV.nactive} are required."
+            )
+        active_coords = coords[0:3 * thisAV.nactive].reshape([thisAV.nactive, 3]).T
+        disps = active_coords - original_coords
+        AVitags_relax = [np.array([], dtype=int) for _ in range(seakmcdata.ndefects)]
+        AVitags_relax[idav] = active_itags
+        seakmcdata.update_coords_from_disps(idav, disps, AVitags_relax)
+        local_energies.append(encalc)
+        max_disp = float(np.max(np.linalg.norm(disps.T, axis=1))) if disps.size > 0 else 0.0
+        if rank_world == 0:
+            LogWriter.write_data(
+                f"InitialRelaxActiveOnly AV {idav}: nactive={thisAV.nactive}, "
+                f"local_energy={encalc}, max_active_disp_A={max_disp:.6f}."
+            )
+        timing_print(
+            f"initial_active_av_relax idav={idav} nactive={thisAV.nactive} "
+            f"total_s={time.perf_counter() - t_idav:.6f} max_disp_A={max_disp:.6f}",
+            rank_world,
+        )
+
+    seakmcdata = _reset_data_for_defect_rebuild(seakmcdata)
+    seakmcdata.get_defects(LogWriter, last_de_center=last_de_center)
+    if seakmcdata.ndefects != ndefects_initial:
+        error_exit(
+            "InitialRelaxActiveOnly aborts because local relaxation changed defect count: "
+            f"before={ndefects_initial}, after={seakmcdata.ndefects}."
+        )
+    eproxy = float(np.sum(local_energies)) if len(local_energies) > 0 else 0.0
+    seakmcdata = comm_world.bcast(seakmcdata if rank_world == 0 else None, root=0)
+    if rank_world == 0:
+        LogWriter.write_data(
+            "InitialRelaxActiveOnly finished. The reported ground energy is a local AV energy proxy; "
+            "CalBarrsInData must remain false in this mode."
+        )
+    timing_print(f"initial_active_av_relax total_s={time.perf_counter() - t_all:.6f} ndefects={ndefects_initial}",
+                 rank_world)
+    return seakmcdata, eproxy
 
 
 def run_seakmc(thissett, seakmcdata, object_dict, Eground, thisRestart):
@@ -144,6 +261,10 @@ def run_seakmc(thissett, seakmcdata, object_dict, Eground, thisRestart):
                 LogWriter.write_data(logstr)
 
             seakmcdata.get_defects(LogWriter, last_de_center=last_de_center)
+            if istep == 0 and thissett.data.get("InitialRelaxActiveOnly", False):
+                seakmcdata, Eground = relax_initial_active_volumes(
+                    thissett, seakmcdata, force_evaluator, LogWriter,
+                    last_de_center=last_de_center, nproc_task=nproc_task, GPU_args=GPU_args)
             dataout.visualize_data_AVs(thissett.visual, seakmcdata, istep, out_paths[1])
             emptya = np.array([], dtype=int)
             AVitags = [emptya for i in range(seakmcdata.ndefects)]
@@ -239,6 +360,7 @@ def run_seakmc(thissett, seakmcdata, object_dict, Eground, thisRestart):
         sel_SPs = comm_world.bcast(sel_SPs, root=0)
         this_simulation_time = comm_world.bcast(this_simulation_time, root=0)
         thisExports = comm_world.bcast(thisExports, root=0)
+        simulation_time = comm_world.bcast(simulation_time if rank_world == 0 else None, root=0)
         if len(sel_SPs) > 0:
             dataout.visualize_data_SPs(thissett.visual, seakmcdata, AVitags, DataSPs, sel_SPs, istep, out_paths[1])
         else:
@@ -246,6 +368,14 @@ def run_seakmc(thissett, seakmcdata, object_dict, Eground, thisRestart):
                                                                       out_paths[1])
 
         comm_world.Barrier()
+        if not thissett.kinetic_MC.get("RelaxAfterKMC", True):
+            if rank_world == 0:
+                LogWriter.write_data(
+                    "kinetic_MC.RelaxAfterKMC=false: skipping final KMC coordinate update and OPT relaxation."
+                )
+            timing_print(f"relax_after_kmc skipped istep={istep}", rank_world)
+            return simulation_time
+
         DataSPs = None
         sel_SPs = None
 

@@ -34,6 +34,19 @@ When enabled, the initial global `DATAMD` / `DATAOPT` relaxation is skipped. SEA
 
 This mode is intended for cases where the input structure is already relaxed before inserting the target defect, and only the local environment around the inserted defect needs to be relaxed.
 
+An optional input can use a different active radius only for this initial local relaxation:
+
+```yaml
+data:
+    InitialRelaxActiveOnly: true
+    DActive4InitialRelax: 45.0
+
+active_volume:
+    DActive: 15.0
+```
+
+When `DActive4InitialRelax` is set, the initial `SPSRELAX` active volume is built with that radius, then `active_volume.DActive` is restored and the formal active volumes are rebuilt before data output, saddle searches, and KMC. If `DActive4InitialRelax` is omitted or `false`, the workflow is unchanged and the initial local relaxation uses `active_volume.DActive`.
+
 In the parallel implementation, all MPI ranks participate in the local `SPSRELAX` calculation through `MPI.COMM_WORLD`, following the mature workflow used in the previous fast-scan implementation.
 
 For compatibility and safety, this mode is currently rejected when used together with:
@@ -78,6 +91,8 @@ data:
 ```
 
 This option is only allowed when `InitialRelaxActiveOnly: true`.
+
+When `DActive4InitialRelax` is used together with cropped input, the crop must include all atoms required by the initial active-volume relaxation, not only the formal saddle-search active volume. In practice the cropped structure should cover at least `DActive4InitialRelax + DBuffer + DFixed` around each relaxed defect center. The runtime log prints this required margin when cropping is enabled.
 
 When enabled, SEAKMC crops the original LAMMPS data file using absolute x/y/z coordinate ranges, writes the cropped data file next to `input.yaml`, and then uses the cropped file as the input for the subsequent calculation.
 

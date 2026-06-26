@@ -81,6 +81,7 @@ data:
     FileName: data.small.dat
     Relaxed: False
     InitialRelaxActiveOnly: False
+    DActive4InitialRelax: False
     CropInputForActiveRelax:
         Enable: False
         OutputFile: data.cropped.dat

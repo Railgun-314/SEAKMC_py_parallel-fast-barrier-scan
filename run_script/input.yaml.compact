@@ -42,6 +42,7 @@ data:
     BoxRelax: False
     Relaxed: False
     InitialRelaxActiveOnly: False
+    DActive4InitialRelax: False
     CropInputForActiveRelax:
         Enable: False
         OutputFile: data.cropped.dat

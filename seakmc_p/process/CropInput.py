@@ -259,6 +259,15 @@ def maybe_crop_input_for_active_relax(settings, input_yaml: os.PathLike[str] | s
     if not settings.data.get("InitialRelaxActiveOnly", False):
         raise ValueError("data.CropInputForActiveRelax can only be enabled when data.InitialRelaxActiveOnly is true.")
 
+    dactive_initial = settings.data.get("DActive4InitialRelax", False) or settings.active_volume["DActive"]
+    required_margin = float(dactive_initial) + float(settings.active_volume["DBuffer"]) + float(settings.active_volume["DFixed"])
+    if rank_world == 0 and log_writer is not None:
+        log_writer.write_data(
+            "CropInputForActiveRelax notice: with InitialRelaxActiveOnly, the cropped input must include all atoms "
+            f"needed by the initial active-volume relaxation radius, i.e. at least DActive_initial + DBuffer + DFixed = "
+            f"{required_margin} A around each relaxed defect center."
+        )
+
     run_dir = Path(input_yaml).resolve().parent
     original_file = Path(settings.data["FileName"])
     if not original_file.is_absolute():

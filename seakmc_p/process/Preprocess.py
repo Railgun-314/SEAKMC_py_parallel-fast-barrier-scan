@@ -186,7 +186,9 @@ def preprocess(thissett):
         Eground = thisRestart.Eground
         istep_this = thisRestart.istep_this
         simulation_time = thisRestart.simulation_time
-        if Eground is None or Eground == 0.0:
+        if thissett.data.get("InitialRelaxActiveOnly", False) and Eground is None:
+            Eground = 0.0
+        if (Eground is None or Eground == 0.0) and not thissett.data.get("InitialRelaxActiveOnly", False):
             [Eground, relaxed_coords, isValid, errormsg] = mydatadyn.data_dynamics("DATAMD0", force_evaluator,
                                                                                    seakmcdata, 1,
                                                                                    nactive=seakmcdata.natoms,
